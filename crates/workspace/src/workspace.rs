@@ -10353,7 +10353,11 @@ pub async fn apply_restored_multiworkspace_state(
         // stale keys from previous sessions get normalized and deduped.
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
-            let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
+            let SerializedProjectGroupState {
+                key,
+                expanded,
+                show_archived,
+            } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
             }
@@ -10375,6 +10379,7 @@ pub async fn apply_restored_multiworkspace_state(
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
+                    show_archived,
                 });
             }
         }

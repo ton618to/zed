@@ -655,6 +655,38 @@ impl ThreadMetadataStore {
             .filter(move |s| s.matches_remote_connection(remote_connection))
     }
 
+    /// Returns threads for the given path list and remote connection,
+    /// including archived threads. Mirrors [`entries_for_path`] but keeps
+    /// archived rows.
+    pub fn entries_for_path_include_archived<'a>(
+        &'a self,
+        path_list: &PathList,
+        remote_connection: Option<&'a RemoteConnectionOptions>,
+    ) -> impl Iterator<Item = &'a ThreadMetadata> + 'a {
+        self.threads_by_paths
+            .get(path_list)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| self.threads.get(s))
+            .filter(move |s| s.matches_remote_connection(remote_connection))
+    }
+
+    /// Returns threads whose `main_worktree_paths` matches the given path
+    /// list and remote connection, including archived threads. Mirrors
+    /// [`entries_for_main_worktree_path`] but keeps archived rows.
+    pub fn entries_for_main_worktree_path_include_archived<'a>(
+        &'a self,
+        path_list: &PathList,
+        remote_connection: Option<&'a RemoteConnectionOptions>,
+    ) -> impl Iterator<Item = &'a ThreadMetadata> + 'a {
+        self.threads_by_main_paths
+            .get(path_list)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| self.threads.get(s))
+            .filter(move |s| s.matches_remote_connection(remote_connection))
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) -> Shared<Task<()>> {
         let db = self.db.clone();
         self.reload_task.take();
