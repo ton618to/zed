@@ -68,6 +68,8 @@ pub struct SerializedProjectGroup {
     pub(crate) location: SerializedWorkspaceLocation,
     #[serde(default = "default_expanded")]
     pub expanded: bool,
+    #[serde(default)]
+    pub show_archived: bool,
 }
 
 fn default_expanded() -> bool {
@@ -75,7 +77,7 @@ fn default_expanded() -> bool {
 }
 
 impl SerializedProjectGroup {
-    pub fn from_group(key: &ProjectGroupKey, expanded: bool) -> Self {
+    pub fn from_group(key: &ProjectGroupKey, expanded: bool, show_archived: bool) -> Self {
         Self {
             path_list: key.path_list().serialize(),
             location: match key.host() {
@@ -83,6 +85,7 @@ impl SerializedProjectGroup {
                 None => SerializedWorkspaceLocation::Local,
             },
             expanded,
+            show_archived,
         }
     }
 
@@ -95,6 +98,7 @@ impl SerializedProjectGroup {
         SerializedProjectGroupState {
             key: ProjectGroupKey::new(host, path_list),
             expanded: self.expanded,
+            show_archived: self.show_archived,
         }
     }
 }
