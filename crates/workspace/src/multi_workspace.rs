@@ -278,12 +278,14 @@ pub struct ProjectGroup {
 pub struct SerializedProjectGroupState {
     pub key: ProjectGroupKey,
     pub expanded: bool,
+    pub show_archived: bool,
 }
 
 #[derive(Clone)]
 pub struct ProjectGroupState {
     pub key: ProjectGroupKey,
     pub expanded: bool,
+    pub show_archived: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -675,6 +677,7 @@ impl MultiWorkspace {
             ProjectGroupState {
                 key,
                 expanded: true,
+                show_archived: false,
             },
         );
     }
@@ -822,14 +825,23 @@ impl MultiWorkspace {
         _cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
-        for SerializedProjectGroupState { key, expanded } in groups {
+        for SerializedProjectGroupState {
+            key,
+            expanded,
+            show_archived,
+        } in groups
+        {
             if key.path_list().paths().is_empty() {
                 continue;
             }
             if restored.iter().any(|group| group.key == key) {
                 continue;
             }
-            restored.push(ProjectGroupState { key, expanded });
+            restored.push(ProjectGroupState {
+                key,
+                expanded,
+                show_archived,
+            });
         }
         for existing in std::mem::take(&mut self.project_groups) {
             if !restored.iter().any(|group| group.key == existing.key) {
@@ -1459,6 +1471,7 @@ impl MultiWorkspace {
                     crate::persistence::model::SerializedProjectGroup::from_group(
                         &group.key,
                         group.expanded,
+                        group.show_archived,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -1640,6 +1653,7 @@ impl MultiWorkspace {
         self.project_groups.push(ProjectGroupState {
             key: group.key,
             expanded: group.expanded,
+            show_archived: false,
         });
     }
 

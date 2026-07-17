@@ -27,6 +27,7 @@ use editor::Editor;
 use feature_flags::{
     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
 };
+use fs::Fs;
 use gpui::{
     Action as _, AnyElement, App, ClickEvent, ClipboardItem, Context, Decorations, DismissEvent,
     Entity, EntityId, FocusHandle, Focusable, KeyContext, ListState, Modifiers, Pixels, Render,
@@ -1000,6 +1001,33 @@ impl Sidebar {
         }
     }
 
+    fn is_group_show_archived(&self, key: &ProjectGroupKey, cx: &App) -> bool {
+        self.multi_workspace
+            .upgrade()
+            .and_then(|mw| {
+                mw.read(cx)
+                    .group_state_by_key(key)
+                    .map(|state| state.show_archived)
+            })
+            .unwrap_or(false)
+    }
+
+    fn set_group_show_archived(
+        &self,
+        key: &ProjectGroupKey,
+        show_archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mw) = self.multi_workspace.upgrade() {
+            mw.update(cx, |mw, cx| {
+                if let Some(state) = mw.group_state_by_key_mut(key) {
+                    state.show_archived = show_archived;
+                }
+                mw.serialize(cx);
+            });
+        }
+    }
+
     fn is_active_workspace(&self, workspace: &Entity<Workspace>, cx: &App) -> bool {
         self.multi_workspace
             .upgrade()
@@ -1592,6 +1620,7 @@ impl Sidebar {
             let label = group_key.display_name(&path_detail_map);
 
             let is_collapsed = self.is_group_collapsed(group_key, cx);
+            let show_archived = self.is_group_show_archived(group_key, cx);
             let should_load_threads = !is_collapsed || !query.is_empty();
 
             let is_active = active_workspace
@@ -1636,15 +1665,54 @@ impl Sidebar {
                         })
                     };
 
-                // Main code path: one query per group via main_worktree_paths.
-                // The main_worktree_paths column is set on all new threads and
-                // points to the group's canonical paths regardless of which
-                // linked worktree the thread was opened in.
-                for row in thread_store
-                    .read(cx)
-                    .entries_for_main_worktree_path(group_key.path_list(), group_host.as_ref())
-                    .cloned()
-                {
+                // The four passes below cover:
+                //   1. Threads whose `main_worktree_paths` equals the
+                //      group key. This is the common case for new threads.
+                //   2. Legacy threads without `main_worktree_paths`, matched
+                //      by their `folder_paths` against the group key.
+                //   3. Threads whose `folder_paths` equals one of this
+                //      group's open workspaces' root paths, in case (1)/(2)
+                //      miss due to stale rows on linked-worktree workspaces.
+                //      Rewritten to the correct shape on next
+                //      `handle_conversation_event`.
+                //   4. Legacy threads keyed against any single linked
+                //      worktree of this project group.
+                //
+                // When `show_archived` is true, each pass uses the
+                // include-archived query variant; otherwise archived rows
+                // are filtered out at the store level.
+                let entries_by_main = |path_list: &PathList| -> Vec<ThreadMetadata> {
+                    let store = thread_store.read(cx);
+                    if show_archived {
+                        store
+                            .entries_for_main_worktree_path_include_archived(
+                                path_list,
+                                group_host.as_ref(),
+                            )
+                            .cloned()
+                            .collect()
+                    } else {
+                        store
+                            .entries_for_main_worktree_path(path_list, group_host.as_ref())
+                            .cloned()
+                            .collect()
+                    }
+                };
+                let entries_by_path = |path_list: &PathList| -> Vec<ThreadMetadata> {
+                    let store = thread_store.read(cx);
+                    if show_archived {
+                        store
+                            .entries_for_path_include_archived(path_list, group_host.as_ref())
+                            .cloned()
+                            .collect()
+                    } else {
+                        store
+                            .entries_for_path(path_list, group_host.as_ref())
+                            .cloned()
+                            .collect()
+                    }
+                };
+                for row in entries_by_main(group_key.path_list()) {
                     if !seen_thread_ids.insert(row.thread_id) {
                         continue;
                     }
@@ -1652,15 +1720,7 @@ impl Sidebar {
                     threads.push(make_thread_entry(row, workspace));
                 }
 
-                // Legacy threads did not have `main_worktree_paths` populated, so they
-                // must be queried by their `folder_paths`.
-
-                // Load any legacy threads for the main worktrees of this project group.
-                for row in thread_store
-                    .read(cx)
-                    .entries_for_path(group_key.path_list(), group_host.as_ref())
-                    .cloned()
-                {
+                for row in entries_by_path(group_key.path_list()) {
                     if !seen_thread_ids.insert(row.thread_id) {
                         continue;
                     }
@@ -1668,44 +1728,21 @@ impl Sidebar {
                     threads.push(make_thread_entry(row, workspace));
                 }
 
-                // Also surface any thread whose `folder_paths` equals
-                // one of this group's open workspaces' root paths.
-                // The three lookups above can all miss when the
-                // thread's stored `main_worktree_paths` disagree with
-                // the group key (for example, a stale row whose main
-                // paths equal its folder paths for a linked-worktree
-                // workspace). The thread will be rewritten into the
-                // correct shape the next time `handle_conversation_event`
-                // fires, but until then the sidebar should still show
-                // it under the group whose workspace it actually
-                // belongs to.
                 for ws in group_workspaces {
                     let ws_paths = workspace_path_list(ws, cx);
                     if ws_paths.paths().is_empty() {
                         continue;
                     }
-                    for row in thread_store
-                        .read(cx)
-                        .entries_for_path(&ws_paths, group_host.as_ref())
-                        .cloned()
-                    {
+                    for row in entries_by_path(&ws_paths) {
                         if !seen_thread_ids.insert(row.thread_id) {
                             continue;
                         }
-                        threads.push(make_thread_entry(
-                            row,
-                            ThreadEntryWorkspace::Open(ws.clone()),
-                        ));
+                        threads.push(make_thread_entry(row, ThreadEntryWorkspace::Open(ws.clone())));
                     }
                 }
 
-                // Load any legacy threads for any single linked worktree of this project group.
                 for worktree_path_list in &linked_worktree_path_lists {
-                    for row in thread_store
-                        .read(cx)
-                        .entries_for_path(worktree_path_list, group_host.as_ref())
-                        .cloned()
-                    {
+                    for row in entries_by_path(worktree_path_list) {
                         if !seen_thread_ids.insert(row.thread_id) {
                             continue;
                         }
@@ -2930,6 +2967,13 @@ impl Sidebar {
                     .iter()
                     .map(|workspace| active_workspace.as_ref() == Some(workspace))
                     .collect();
+                let show_archived = multi_workspace
+                    .read_with(cx, |mw, _| {
+                        mw.group_state_by_key(&project_group_key)
+                            .map(|state| state.show_archived)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
 
                 let menu =
                     ContextMenu::build_persistent(window, cx, move |menu, _window, menu_cx| {
@@ -3020,6 +3064,27 @@ impl Sidebar {
                                 },
                             )
                             .selectable(!is_active);
+
+                        let menu = menu.toggleable_entry(
+                            "Show Archived Threads",
+                            show_archived,
+                            IconPosition::End,
+                            None,
+                            {
+                                let key = project_group_key.clone();
+                                let sidebar = this_for_menu.clone();
+                                let menu = weak_menu.clone();
+                                move |_window, cx| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.set_group_show_archived(&key, !show_archived, cx);
+                                            sidebar.update_entries(cx);
+                                        })
+                                        .ok();
+                                    menu.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+                                }
+                            },
+                        );
 
                         let menu = if open_workspaces.is_empty() {
                             menu
@@ -5532,6 +5597,64 @@ impl Sidebar {
         );
     }
 
+    /// Permanently delete an archived thread. Mirrors the archive view's
+    /// delete flow: purge the metadata row, clean up any archived worktree
+    /// records, and ask the agent (if available) to drop the underlying
+    /// session.
+    fn delete_archived_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        let store = ThreadMetadataStore::global(cx);
+        let Some((session_id, agent_id)) = store
+            .read(cx)
+            .entry(thread_id)
+            .map(|metadata| (metadata.session_id.clone(), metadata.agent_id.clone()))
+        else {
+            return;
+        };
+        store.update(cx, |store, cx| store.delete(thread_id, cx));
+
+        let agent = Agent::from(agent_id);
+        let fs = <dyn Fs>::global(cx);
+        let connection_task = self
+            .active_workspace(cx)
+            .and_then(|ws| ws.read(cx).panel::<AgentPanel>(cx))
+            .map(|panel| panel.read(cx).connection_store().clone())
+            .map(|store| {
+                store.update(cx, |store, cx| {
+                    store
+                        .request_connection(
+                            agent.clone(),
+                            agent.server(fs, ThreadStore::global(cx)),
+                            cx,
+                        )
+                        .read(cx)
+                        .wait_for_connection()
+                })
+            });
+
+        cx.spawn(async move |_this, cx| {
+            thread_worktree_archive::cleanup_thread_archived_worktrees(thread_id, cx).await;
+
+            let Some(connection_task) = connection_task else {
+                return anyhow::Ok(());
+            };
+            let state = connection_task.await?;
+            let task = cx.update(|cx| {
+                if let Some(session_id) = &session_id
+                    && let Some(list) = state
+                        .connection
+                        .session_list(cx)
+                        .filter(|list| list.supports_delete())
+                {
+                    list.delete_session(session_id, cx)
+                } else {
+                    Task::ready(Ok(()))
+                }
+            });
+            task.await
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// Archive a thread and activate the nearest neighbor or a draft.
     ///
     /// IMPORTANT: when activating a neighbor or creating a fallback draft,
@@ -6317,6 +6440,7 @@ impl Sidebar {
             .highlight_positions(thread.highlight_positions.to_vec())
             .title_generating(title_generating)
             .notified(has_notification)
+            .archived(thread.metadata.archived)
             .when(thread.diff_stats.lines_added > 0, |this| {
                 this.added(thread.diff_stats.lines_added as usize)
             })
@@ -6400,6 +6524,18 @@ impl Sidebar {
                                 })
                                 .into_any_element(),
                         ),
+                        None if thread.metadata.archived => Some(
+                            IconButton::new("delete-thread", IconName::Trash)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Delete Thread"))
+                                .on_click({
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.delete_archived_thread(thread_id_for_actions, cx);
+                                    })
+                                })
+                                .into_any_element(),
+                        ),
                         None => Some(
                             IconButton::new("archive-thread", IconName::Archive)
                                 .hover_background(button_hover_bg)
@@ -6419,7 +6555,7 @@ impl Sidebar {
                                 .on_click({
                                     let session_id = session_id_for_delete.clone();
                                     cx.listener(move |this, _, window, cx| {
-                                        if let Some(ref session_id) = session_id {
+                                        if let Some(session_id) = &session_id {
                                             this.archive_thread(session_id, window, cx);
                                         }
                                     })
@@ -6480,6 +6616,7 @@ impl Sidebar {
         let is_zed_thread = thread.metadata.agent_id.as_ref() == ZED_AGENT_ID.as_ref();
         let can_open_as_markdown = thread.is_live || is_zed_thread;
         let folder_paths = thread.metadata.folder_paths().clone();
+        let is_archived = thread.metadata.archived;
 
         right_click_menu(context_menu_id)
             .trigger(move |_, _, _| thread_item)
@@ -6597,16 +6734,28 @@ impl Sidebar {
                             });
                         }
 
-                        menu.separator().entry("Archive Thread", None, {
-                            let session_id = session_id.clone();
-                            move |window, cx| {
-                                sidebar
-                                    .update(cx, |sidebar, cx| {
-                                        sidebar.archive_thread(&session_id, window, cx);
-                                    })
-                                    .ok();
-                            }
-                        })
+                        if is_archived {
+                            menu.separator().entry("Delete Thread", None, {
+                                move |_window, cx| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.delete_archived_thread(thread_id, cx);
+                                        })
+                                        .ok();
+                                }
+                            })
+                        } else {
+                            menu.separator().entry("Archive Thread", None, {
+                                let session_id = session_id.clone();
+                                move |window, cx| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.archive_thread(&session_id, window, cx);
+                                        })
+                                        .ok();
+                                }
+                            })
+                        }
                     })
                 }
             })
