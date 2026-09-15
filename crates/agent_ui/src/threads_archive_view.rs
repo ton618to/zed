@@ -20,7 +20,8 @@ use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Decorations, DismissEvent, Entity, EventEmitter,
     FocusHandle,
-    Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window,
+    Focusable, ListState, MouseButton, MouseMoveEvent, Render, SharedString, Subscription, Task,
+    TaskExt, WeakEntity, Window,
     list, prelude::*, px,
 };
 use itertools::Itertools as _;
@@ -147,6 +148,7 @@ pub struct ThreadsArchiveView {
     items: Vec<ArchiveListItem>,
     selection: Option<usize>,
     hovered_index: Option<usize>,
+    dragging: bool,
     preserve_selection_on_next_update: bool,
     filter_editor: Entity<Editor>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -218,6 +220,7 @@ impl ThreadsArchiveView {
             items: Vec::new(),
             selection: None,
             hovered_index: None,
+            dragging: false,
             preserve_selection_on_next_update: false,
             filter_editor,
             _subscriptions: vec![
@@ -793,37 +796,55 @@ impl ThreadsArchiveView {
                 // have been used at least once) get a Copy Session ID menu. Skip
                 // wrapping in-flight restore items so users don't right-click
                 // something whose click also triggers a cancel.
-                if is_restoring {
-                    return inner;
-                }
-                let Some(session_id) = thread.session_id.clone() else {
-                    return inner;
-                };
-
-                let workspace = self.workspace.clone();
-                right_click_menu(("archive-context", ix))
-                    .trigger(move |_, _, _| inner)
-                    .menu(move |window, cx| {
-                        let session_id = session_id.clone();
-                        let workspace = workspace.clone();
-                        ContextMenu::build(window, cx, move |menu, _window, _cx| {
-                            menu.entry("Copy Session ID", None, move |_window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    session_id.to_string(),
-                                ));
-                                if let Some(workspace) = workspace.upgrade() {
-                                    workspace.update(cx, |workspace, cx| {
-                                        let toast = StatusToast::new(
-                                            "Session ID copied to clipboard",
-                                            cx,
-                                            |this, _cx| this,
-                                        );
-                                        workspace.toggle_status_toast(toast, cx);
-                                    });
-                                }
+                let row = if is_restoring {
+                    inner
+                } else if let Some(session_id) = thread.session_id.clone() {
+                    let workspace = self.workspace.clone();
+                    right_click_menu(("archive-context", ix))
+                        .trigger(move |_, _, _| inner)
+                        .menu(move |window, cx| {
+                            let session_id = session_id.clone();
+                            let workspace = workspace.clone();
+                            ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                                menu.entry("Copy Session ID", None, move |_window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        session_id.to_string(),
+                                    ));
+                                    if let Some(workspace) = workspace.upgrade() {
+                                        workspace.update(cx, |workspace, cx| {
+                                            let toast = StatusToast::new(
+                                                "Session ID copied to clipboard",
+                                                cx,
+                                                |this, _cx| this,
+                                            );
+                                            workspace.toggle_status_toast(toast, cx);
+                                        });
+                                    }
+                                })
                             })
                         })
-                    })
+                        .into_any_element()
+                } else {
+                    inner
+                };
+
+                // `on_hover` stops firing once a mouse button is held, so drag
+                // selection is driven by `on_mouse_move`, which keeps firing
+                // during a drag and reports the held button via `dragging()`.
+                div()
+                    .child(row)
+                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                        if this.dragging
+                            && event.dragging()
+                            && this.is_selectable_item(ix)
+                            && this.selection != Some(ix)
+                        {
+                            this.selection = Some(ix);
+                            this.list_state.scroll_to_reveal_item(ix);
+                            this.focus_handle.focus(window, cx);
+                            cx.notify();
+                        }
+                    }))
                     .into_any_element()
             }
         }
@@ -1149,6 +1170,40 @@ impl Render for ThreadsArchiveView {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::remove_selected_thread))
             .on_action(cx.listener(Self::archive_selected_thread))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.dragging = true;
+                    // Selecting the entry already under the cursor makes a plain
+                    // click behave like a drag of length zero.
+                    if let Some(ix) = this.hovered_index.filter(|&ix| this.is_selectable_item(ix)) {
+                        if this.selection != Some(ix) {
+                            this.selection = Some(ix);
+                            this.list_state.scroll_to_reveal_item(ix);
+                            this.focus_handle.focus(window, cx);
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.dragging {
+                        this.dragging = false;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.dragging {
+                        this.dragging = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .size_full()
             .child(self.render_header(window, cx))
             .when(!has_query, |this| this.child(self.render_toolbar(cx)))
