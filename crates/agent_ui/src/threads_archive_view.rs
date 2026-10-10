@@ -19,9 +19,8 @@ use fs::Fs;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Decorations, DismissEvent, Entity, EventEmitter,
-    FocusHandle,
-    Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window,
-    list, prelude::*, px,
+    FocusHandle, Focusable, ListState, Render, SharedString, Subscription, Task, TaskExt,
+    WeakEntity, Window, list, prelude::*, px,
 };
 use itertools::Itertools as _;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
