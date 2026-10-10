@@ -1,0 +1,53 @@
+name: build
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '0'
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  bundle_mac_aarch64:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      # Skip hard-failing when a dependency is missing license metadata,
+      # so a personal (unsigned) build still produces a DMG.
+      ALLOW_MISSING_LICENSES: '1'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        clean: false
+
+    - name: Set up Rust toolchain
+      run: rustup show
+
+    - name: Set up Node (needed for dmg-license)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Print macOS toolchain
+      run: |
+        sw_vers
+        xcodebuild -version
+        xcrun --sdk macosx --show-sdk-version
+
+    - name: Bundle macOS app + DMG (release, unsigned)
+      run: ./script/bundle-mac aarch64-apple-darwin
+
+    - name: Upload Zed DMG
+      uses: actions/upload-artifact@v4
+      with:
+        name: Zed-aarch64.dmg
+        path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+        if-no-files-found: error
