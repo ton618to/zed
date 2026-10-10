@@ -16,7 +16,10 @@ use agent_ui::{
 };
 use chrono::DateTime;
 use fs::{FakeFs, Fs};
-use gpui::{App, Bounds, Hsla, Point, Rgba, TestAppContext, UpdateGlobal, VisualTestContext};
+use gpui::{
+    App, Bounds, Hsla, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
+    Rgba, TestAppContext, UpdateGlobal, VisualTestContext,
+};
 use pretty_assertions::assert_eq;
 use project::AgentId;
 use settings::{Settings, SettingsStore};
@@ -308,6 +311,34 @@ fn setup_sidebar_closed(
     });
     cx.run_until_parked();
     sidebar
+}
+
+fn simulate_drag(
+    source: Point<gpui::Pixels>,
+    target: Point<gpui::Pixels>,
+    cx: &mut VisualTestContext,
+) {
+    cx.simulate_event(MouseDownEvent {
+        position: source,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseMoveEvent {
+        position: target,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    assert!(cx.update(|_, cx| cx.has_active_drag()));
+    cx.run_until_parked();
+    cx.simulate_event(MouseUpEvent {
+        position: target,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
 }
 
 fn set_threads_sidebar_default_width(width: f32, cx: &mut App) {
@@ -811,6 +842,137 @@ async fn test_sidebar_action_hover_contrasts_with_row(cx: &mut TestAppContext) {
             assert_sidebar_action_hover(selector, row_bounds, cx);
         }
     }
+}
+
+#[gpui::test]
+async fn test_drag_project_header_reorders_project_groups(cx: &mut TestAppContext) {
+    let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+    let initial_order = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
+    assert_eq!(initial_order.len(), 2);
+    let expected_order = vec![initial_order[1].clone(), initial_order[0].clone()];
+
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(400.), px(240.)),
+        |_, _| sidebar.clone().into_any_element(),
+    );
+    let (source_item_bounds, target_item_bounds) = sidebar.read_with(cx, |sidebar, cx| {
+        assert_eq!(sidebar.contents.project_header_indices, vec![0, 1]);
+        assert!(!sidebar.has_filter_query(cx));
+        (
+            sidebar
+                .list_state
+                .bounds_for_item(0)
+                .expect("first project group"),
+            sidebar
+                .list_state
+                .bounds_for_item(1)
+                .expect("second project group"),
+        )
+    });
+    let header_height = cx.update(|_, cx| Tab::content_height(cx));
+    let source_bounds = Bounds::new(
+        source_item_bounds.origin,
+        gpui::size(source_item_bounds.size.width, header_height),
+    );
+    let target_bounds = Bounds::new(
+        target_item_bounds.origin,
+        gpui::size(target_item_bounds.size.width, header_height),
+    );
+    cx.simulate_click(source_bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(sidebar.read_with(cx, |sidebar, cx| {
+        sidebar.is_group_collapsed(&initial_order[0], cx)
+    }));
+    cx.simulate_click(source_bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(sidebar.read_with(cx, |sidebar, cx| {
+        !sidebar.is_group_collapsed(&initial_order[0], cx)
+    }));
+
+    simulate_drag(source_bounds.center(), target_bounds.center(), cx);
+
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()),
+        expected_order
+    );
+}
+
+#[gpui::test]
+async fn test_drag_sticky_project_header_reorders_project_groups(cx: &mut TestAppContext) {
+    let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let workspace_b = add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+    let project_b = workspace_b.read_with(cx, |workspace, _| workspace.project().clone());
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+    let initial_order = multi_workspace.read_with(cx, |mw, _| mw.project_group_keys());
+    assert_eq!(initial_order.len(), 2);
+    let first_project = if initial_order[0] == key_a {
+        &project_a
+    } else {
+        assert_eq!(initial_order[0], key_b);
+        &project_b
+    };
+    let expected_order = vec![initial_order[1].clone(), initial_order[0].clone()];
+    save_n_test_threads(30, first_project, cx).await;
+
+    let draw_sidebar = |cx: &mut VisualTestContext| {
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(400.), px(240.)),
+            |_, _| sidebar.clone().into_any_element(),
+        );
+    };
+    draw_sidebar(cx);
+
+    let (first_header_index, header_height) = sidebar.read_with(cx, |sidebar, _| {
+        assert_eq!(sidebar.contents.project_header_indices.len(), 2);
+        let first_header_index = sidebar.contents.project_header_indices[0];
+        let header_height = sidebar
+            .list_state
+            .bounds_for_item(first_header_index)
+            .expect("first project header")
+            .size
+            .height;
+        (first_header_index, header_height)
+    });
+    sidebar.update_in(cx, |sidebar, _window, cx| {
+        sidebar.list_state.scroll_to(gpui::ListOffset {
+            item_ix: 5,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    });
+    draw_sidebar(cx);
+
+    assert_eq!(first_header_index, 0);
+    assert_eq!(
+        sidebar.read_with(cx, |sidebar, _| sidebar
+            .list_state
+            .logical_scroll_top()
+            .item_ix),
+        5
+    );
+    let viewport_bounds = sidebar.read_with(cx, |sidebar, _| sidebar.list_state.viewport_bounds());
+    let source_bounds = Bounds::new(
+        viewport_bounds.origin,
+        gpui::size(viewport_bounds.size.width, header_height),
+    );
+    let target_position = viewport_bounds.center();
+
+    simulate_drag(source_bounds.center(), target_position, cx);
+
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, _| mw.project_group_keys()),
+        expected_order
+    );
 }
 
 #[gpui::test]
