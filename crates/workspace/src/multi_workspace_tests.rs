@@ -1070,6 +1070,67 @@ async fn test_remove_project_group_opens_unloaded_local_neighbor(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn test_move_project_group_to_and_end(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project-a", json!({})).await;
+    fs.insert_tree("/project-b", json!({})).await;
+    fs.insert_tree("/project-c", json!({})).await;
+    cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+
+    let project_a = Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/project-b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/project-c".as_ref()], cx).await;
+
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_c = project_c.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) = setup_multi_workspace(&[project_a], cx);
+
+    multi_workspace.update(cx, |multi_workspace, _cx| {
+        multi_workspace.test_add_project_group(ProjectGroup {
+            key: key_b.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+        multi_workspace.test_add_project_group(ProjectGroup {
+            key: key_c.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+    });
+
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.project_group_keys(), vec![key_a.clone(), key_b.clone(), key_c.clone()]);
+    });
+
+    // Move A to C (index 0 to index 2)
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(mw.move_project_group_to(&key_a, &key_c, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.project_group_keys(), vec![key_b.clone(), key_c.clone(), key_a.clone()]);
+    });
+
+    // Move C to top (before B)
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(mw.move_project_group_to(&key_c, &key_b, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.project_group_keys(), vec![key_c.clone(), key_b.clone(), key_a.clone()]);
+    });
+
+    // Move C to end
+    multi_workspace.update(cx, |mw, cx| {
+        assert!(mw.move_project_group_to_end(&key_c, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.project_group_keys(), vec![key_b.clone(), key_a.clone(), key_c.clone()]);
+    });
+}
+
+#[gpui::test]
 async fn test_remove_project_group_replaces_unretained_active_workspace(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
@@ -1095,10 +1156,12 @@ async fn test_remove_project_group_replaces_unretained_active_workspace(cx: &mut
                 SerializedProjectGroupState {
                     key: key_a.clone(),
                     expanded: true,
+                    show_archived: false,
                 },
                 SerializedProjectGroupState {
                     key: remote_key.clone(),
                     expanded: true,
+                    show_archived: false,
                 },
             ],
             cx,

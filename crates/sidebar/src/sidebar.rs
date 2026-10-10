@@ -433,6 +433,32 @@ impl RenameTarget {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct DraggedProjectGroup {
+    pub key: ProjectGroupKey,
+    pub label: SharedString,
+}
+
+pub struct DraggedProjectGroupPreview {
+    label: SharedString,
+}
+
+impl Render for DraggedProjectGroupPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .shadow_md()
+            .gap_1p5()
+            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+            .child(Label::new(self.label.clone()).size(LabelSize::Small))
+    }
+}
+
 #[derive(Clone)]
 enum ActivatableEntry {
     Thread {
@@ -2371,6 +2397,7 @@ impl Sidebar {
 
         let has_filter = self.has_filter_query(cx);
 
+        let label_str = label.clone();
         let id_prefix = if is_sticky { "sticky-" } else { "" };
         let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
         let group_name = SharedString::from(format!("{id_prefix}header-group-{ix}"));
@@ -2561,6 +2588,42 @@ impl Sidebar {
                 }),
             )
             .block_mouse_except_scroll();
+        let header = header.when(!is_sticky && !has_filter, |this| {
+            let key = key.clone();
+            let multi_workspace = self.multi_workspace.clone();
+            this.on_drag(
+                DraggedProjectGroup {
+                    key: key.clone(),
+                    label: label_str,
+                },
+                |dragged, _, _window, cx| {
+                    cx.new(|_| DraggedProjectGroupPreview {
+                        label: dragged.label.clone(),
+                    })
+                },
+            )
+            .drag_over::<DraggedProjectGroup>({
+                let key = key.clone();
+                move |style, dragged, _window, cx| {
+                    if dragged.key != key {
+                        style
+                            .bg(cx.theme().colors().drop_target_background)
+                            .border_t_2()
+                            .border_color(cx.theme().colors().drop_target_border)
+                    } else {
+                        style
+                    }
+                }
+            })
+            .on_drop(cx.listener(move |_this, dragged: &DraggedProjectGroup, _window, cx| {
+                if let Some(mw) = multi_workspace.upgrade() {
+                    mw.update(cx, |mw, cx| {
+                        mw.move_project_group_to(&dragged.key, &key, cx);
+                    });
+                }
+            }))
+        });
+
 
         if !is_collapsed && !has_threads {
             v_flex()
@@ -8219,6 +8282,13 @@ impl Render for Sidebar {
                                     .relative()
                                     .flex_1()
                                     .overflow_hidden()
+                                    .on_drop(cx.listener(|this, dragged: &DraggedProjectGroup, _window, cx| {
+                                        if let Some(mw) = this.multi_workspace.upgrade() {
+                                            mw.update(cx, |mw, cx| {
+                                                mw.move_project_group_to_end(&dragged.key, cx);
+                                            });
+                                        }
+                                    }))
                                     .child(
                                         list(
                                             self.list_state.clone(),
