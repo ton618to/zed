@@ -976,6 +976,141 @@ async fn test_drag_sticky_project_header_reorders_project_groups(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn test_project_menu_moves_groups_to_top_and_bottom(cx: &mut TestAppContext) {
+    let (fs, project) =
+        init_multi_project_test(&["/project-a", "/project-b", "/project-c"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    for path in ["/project-b", "/project-c"] {
+        add_test_project(path, &fs, &multi_workspace, cx).await;
+    }
+    save_n_test_threads(2, &project, cx).await;
+    let threads_before = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .cloned()
+            .map(|thread| (thread.thread_id, thread))
+            .collect::<HashMap<_, _>>()
+    });
+    let active_workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let initial_order = multi_workspace.read_with(cx, |multi_workspace, _| {
+        multi_workspace.project_group_keys()
+    });
+    let [first, moved, last] = initial_order.as_slice() else {
+        panic!("expected three project groups");
+    };
+
+    let open_menu = |cx: &mut VisualTestContext| {
+        let header_index =
+            sidebar.read_with(cx, |sidebar, _| {
+                sidebar.contents.entries.iter().position(|entry| {
+                matches!(entry, ListEntry::ProjectHeader { key, .. } if key == moved)
+            }).expect("moved project header")
+            });
+        let header_position = sidebar.read_with(cx, |sidebar, cx| {
+            let bounds = sidebar
+                .list_state
+                .bounds_for_item(header_index)
+                .expect("visible project header");
+            gpui::point(
+                bounds.center().x,
+                bounds.origin.y + Tab::content_height(cx) / 2.,
+            )
+        });
+        cx.simulate_mouse_down(header_position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(header_position, MouseButton::Right, Modifiers::none());
+        assert!(sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .project_header_menu_handles
+                .get(&header_index)
+                .is_some_and(|handle| handle.is_deployed())
+        }));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    for (selector, expected_order) in [
+        (
+            "MENU_ITEM-Move to Top",
+            vec![moved.clone(), first.clone(), last.clone()],
+        ),
+        (
+            "MENU_ITEM-Move to Bottom",
+            vec![first.clone(), last.clone(), moved.clone()],
+        ),
+    ] {
+        open_menu(cx);
+        let menu_item_bounds = cx
+            .debug_bounds(selector)
+            .expect("folder ordering menu item");
+        cx.simulate_click(menu_item_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+                .project_group_keys()),
+            expected_order
+        );
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(sidebar.project_header_menu_ix.is_none());
+            assert_eq!(
+                sidebar
+                    .contents
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        ListEntry::ProjectHeader { key, .. } => Some(key.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                expected_order
+            );
+        });
+        let saved_order = cx.update(|window, cx| {
+            let json = db::kvp::KeyValueStore::global(cx)
+                .scoped("multi_workspace_state")
+                .read(&window.window_handle().window_id().as_u64().to_string())
+                .expect("read saved project order")
+                .expect("menu reorder should persist project order");
+            serde_json::from_str::<workspace::MultiWorkspaceState>(&json)
+                .expect("saved window state")
+                .project_groups
+                .into_iter()
+                .map(ProjectGroupKey::from)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(saved_order, expected_order);
+        assert_eq!(
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone()),
+            active_workspace
+        );
+        let threads_after = cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx)
+                .read(cx)
+                .entries()
+                .cloned()
+                .map(|thread| (thread.thread_id, thread))
+                .collect::<HashMap<_, _>>()
+        });
+        assert_eq!(threads_after, threads_before);
+
+        open_menu(cx);
+        let disabled_item_bounds = cx
+            .debug_bounds(selector)
+            .expect("disabled ordering menu item");
+        cx.simulate_click(disabled_item_bounds.center(), Modifiers::none());
+        assert_eq!(
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+                .project_group_keys()),
+            expected_order
+        );
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
 async fn test_thread_metadata_update_preserves_sticky_header_measurements(cx: &mut TestAppContext) {
     let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
     let (multi_workspace, cx) =

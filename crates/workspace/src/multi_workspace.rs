@@ -960,6 +960,14 @@ impl MultiWorkspace {
         self.reorder_project_group(source_key, target_index, cx)
     }
 
+    pub fn move_project_group_to_start(
+        &mut self,
+        source_key: &ProjectGroupKey,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.reorder_project_group(source_key, 0, cx)
+    }
+
     pub fn move_project_group_to_end(
         &mut self,
         source_key: &ProjectGroupKey,
