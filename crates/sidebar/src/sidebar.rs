@@ -1713,19 +1713,16 @@ impl Sidebar {
                     };
 
                 let store = thread_store.read(cx);
-                let entries_by_main = |path_list: &PathList| {
-                    store
-                        .entries_for_main_worktree_path_include_archived(path_list, group_host)
-                        .filter(|row| show_archived || !row.archived)
-                        .cloned()
-                };
-                let entries_by_path = |path_list: &PathList| {
-                    store
-                        .entries_for_path_include_archived(path_list, group_host)
-                        .filter(|row| show_archived || !row.archived)
-                        .cloned()
-                };
-                for row in entries_by_main(group_key.path_list()) {
+                // Consume these iterators directly: their opaque return types capture
+                // the path borrow, which cannot escape a path-taking closure.
+                for row in store
+                    .entries_for_main_worktree_path_include_archived(
+                        group_key.path_list(),
+                        group_host,
+                    )
+                    .filter(|row| show_archived || !row.archived)
+                    .cloned()
+                {
                     if !seen_thread_ids.insert(row.thread_id) {
                         continue;
                     }
@@ -1735,7 +1732,11 @@ impl Sidebar {
 
                 // Legacy threads did not have `main_worktree_paths` populated, so they
                 // must be queried by their `folder_paths`.
-                for row in entries_by_path(group_key.path_list()) {
+                for row in store
+                    .entries_for_path_include_archived(group_key.path_list(), group_host)
+                    .filter(|row| show_archived || !row.archived)
+                    .cloned()
+                {
                     if !seen_thread_ids.insert(row.thread_id) {
                         continue;
                     }
@@ -1748,7 +1749,11 @@ impl Sidebar {
                     if ws_paths.paths().is_empty() {
                         continue;
                     }
-                    for row in entries_by_path(&ws_paths) {
+                    for row in store
+                        .entries_for_path_include_archived(&ws_paths, group_host)
+                        .filter(|row| show_archived || !row.archived)
+                        .cloned()
+                    {
                         if !seen_thread_ids.insert(row.thread_id) {
                             continue;
                         }
@@ -1760,7 +1765,11 @@ impl Sidebar {
                 }
 
                 for worktree_path_list in &linked_worktree_path_lists {
-                    for row in entries_by_path(worktree_path_list) {
+                    for row in store
+                        .entries_for_path_include_archived(worktree_path_list, group_host)
+                        .filter(|row| show_archived || !row.archived)
+                        .cloned()
+                    {
                         if !seen_thread_ids.insert(row.thread_id) {
                             continue;
                         }
@@ -3271,7 +3280,8 @@ impl Sidebar {
                             let move_down_key = project_group_key.clone();
                             let move_down_weak_menu = weak_menu.clone();
 
-                            this.separator()
+                            let mut menu = this
+                                .separator()
                                 .item(
                                     ContextMenuEntry::new("Move Up")
                                         .action(Box::new(MoveProjectUp))
@@ -3301,7 +3311,36 @@ impl Sidebar {
                                                 .update(cx, |_, cx| cx.emit(DismissEvent))
                                                 .ok();
                                         }),
-                                )
+                                );
+                            for (label, to_start, enabled) in [
+                                ("Move to Top", true, can_move_up),
+                                ("Move to Bottom", false, can_move_down),
+                            ] {
+                                let multi_workspace = multi_workspace.clone();
+                                let key = project_group_key.clone();
+                                let weak_menu = weak_menu.clone();
+                                menu = menu.item(
+                                    ContextMenuEntry::new(label).disabled(!enabled).handler(
+                                        move |_window, cx| {
+                                            multi_workspace
+                                                .update(cx, |multi_workspace, cx| {
+                                                    if to_start {
+                                                        multi_workspace
+                                                            .move_project_group_to_start(&key, cx);
+                                                    } else {
+                                                        multi_workspace
+                                                            .move_project_group_to_end(&key, cx);
+                                                    }
+                                                })
+                                                .log_err();
+                                            weak_menu
+                                                .update(cx, |_, cx| cx.emit(DismissEvent))
+                                                .log_err();
+                                        },
+                                    ),
+                                );
+                            }
+                            menu
                         });
 
                         let project_group_key = project_group_key.clone();
