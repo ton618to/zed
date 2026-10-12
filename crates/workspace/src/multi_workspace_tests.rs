@@ -1137,6 +1137,37 @@ async fn test_move_project_group_to_and_end(cx: &mut TestAppContext) {
             vec![key_b.clone(), key_a.clone(), key_c.clone()]
         );
     });
+
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        assert!(multi_workspace.move_project_group_to_start(&key_c, cx));
+        assert!(!multi_workspace.move_project_group_to_start(&key_c, cx));
+        assert!(!multi_workspace.move_project_group_to_end(&key_a, cx));
+    });
+    cx.run_until_parked();
+
+    let expected_order = vec![key_c, key_b, key_a];
+    assert_eq!(
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace
+            .project_group_keys()),
+        expected_order
+    );
+    let saved_state = cx.update(|window, cx| {
+        let json = db::kvp::KeyValueStore::global(cx)
+            .scoped("multi_workspace_state")
+            .read(&window.window_handle().window_id().as_u64().to_string())
+            .expect("read saved project order")
+            .expect("project reorder should persist window state");
+        serde_json::from_str::<crate::persistence::model::MultiWorkspaceState>(&json)
+            .expect("saved window state")
+    });
+    assert_eq!(
+        saved_state
+            .project_groups
+            .into_iter()
+            .map(ProjectGroupKey::from)
+            .collect::<Vec<_>>(),
+        expected_order
+    );
 }
 
 #[gpui::test]
