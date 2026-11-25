@@ -781,13 +781,14 @@ impl MultiWorkspace {
                 .iter()
                 .enumerate()
                 .find(|(_, group)| group.key == *old_key)
-                .map(|(index, group)| (index, group.expanded));
-            if !new_key_exists && let Some((old_index, expanded)) = old_group {
+                .map(|(index, group)| (index, group.expanded, group.show_archived));
+            if !new_key_exists && let Some((old_index, expanded, show_archived)) = old_group {
                 self.project_groups.insert(
                     old_index,
                     ProjectGroupState {
                         key: new_key.clone(),
                         expanded,
+                        show_archived,
                     },
                 );
             }
@@ -938,11 +939,21 @@ impl MultiWorkspace {
         else {
             return;
         };
-        let ProjectGroupState { expanded, .. } = self.project_groups.remove(index);
+        let ProjectGroupState {
+            expanded,
+            show_archived,
+            ..
+        } = self.project_groups.remove(index);
         for key in new_keys {
             if self.project_groups.iter().all(|group| group.key != key) {
-                self.project_groups
-                    .insert(index, ProjectGroupState { key, expanded });
+                self.project_groups.insert(
+                    index,
+                    ProjectGroupState {
+                        key,
+                        expanded,
+                        show_archived,
+                    },
+                );
                 index += 1;
             }
         }
